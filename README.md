@@ -11,7 +11,7 @@ sh -c "$(curl -fsLS get.chezmoi.io/lb)"
 ### New Machine (One Command)
 
 ```bash
-chezmoi init --apply git@github.com:arxxyr/dotfiles.git
+chezmoi init --apply git@github.com:StandCN/dotfiles_arxxyr.git
 ```
 
 ### Daily Usage
@@ -76,7 +76,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 pip config set global.index-url https://pypi.mirrors.ustc.edu.cn/simple
 
 # Apply dotfiles
-chezmoi init --apply git@github.com:arxxyr/dotfiles.git
+chezmoi init --apply git@github.com:StandCN/dotfiles_arxxyr.git
 source ~/.zshrc
 ```
 
