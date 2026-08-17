@@ -1,8 +1,6 @@
 {{- if ne .chezmoi.os "windows" -}}
 #!/usr/bin/env bash
 
-PROXY="${1:-http://127.0.0.1:10808}"
-
 case "${1:-on}" in
 off)
     # 环境变量
@@ -16,7 +14,13 @@ off)
     echo "[OK] Proxy disabled"
     ;;
 *)
-    [[ "$1" == "on" ]] && PROXY="http://127.0.0.1:10808" || PROXY="${1:-http://127.0.0.1:10808}"
+    # 宿主机探测统一在 cc-proxy-host（WSL+NAT 为默认网关，mirrored/非 WSL 为 127.0.0.1）。
+    # 默认协议用 http://：wget 不支持 socks、pip 走 socks 需额外装 pysocks、
+    # Node 系 CLI（Claude Code 等）不认 socks5；而 HTTP CONNECT 同样由代理端解析域名，
+    # DNS 语义与 socks5h 等价。需要 socks5 时显式传入 socks5h:// 地址即可。
+    _cc_default="http://$("$HOME/.custom_scripts/cc-proxy-host"):{{ .proxy.port }}"
+
+    [[ "$1" == "on" ]] && PROXY="$_cc_default" || PROXY="${1:-$_cc_default}"
 
     # 环境变量
     export HTTP_PROXY="$PROXY"
@@ -34,23 +38,30 @@ off)
     _cc_port="${_cc_tmp##*:}"
     _cc_host="${_cc_tmp%%:*}"
 
+    # 按代理协议选打洞模式：socks* 走各工具的 socks5 模式，其余走 HTTP CONNECT
+    if [[ "$PROXY" == socks* ]]; then
+        _cc_connect_flag="-S"; _cc_ncat_type="socks5"; _cc_nc_flag="5"
+    else
+        _cc_connect_flag="-H"; _cc_ncat_type="http"; _cc_nc_flag="connect"
+    fi
+
     if command -v connect &>/dev/null; then
         # connect（brew install connect）— 最可靠
-        export GIT_SSH_COMMAND="ssh -o ProxyCommand='connect -H ${_cc_host}:${_cc_port} %h %p'"
+        export GIT_SSH_COMMAND="ssh -o ProxyCommand='connect ${_cc_connect_flag} ${_cc_host}:${_cc_port} %h %p'"
     elif command -v ncat &>/dev/null; then
         # nmap ncat
-        export GIT_SSH_COMMAND="ssh -o ProxyCommand='ncat --proxy-type http --proxy ${_cc_host}:${_cc_port} %h %p'"
+        export GIT_SSH_COMMAND="ssh -o ProxyCommand='ncat --proxy-type ${_cc_ncat_type} --proxy ${_cc_host}:${_cc_port} %h %p'"
     elif command -v connect-proxy &>/dev/null; then
         # connect-proxy
-        export GIT_SSH_COMMAND="ssh -o ProxyCommand='connect-proxy -H ${_cc_host}:${_cc_port} %h %p'"
+        export GIT_SSH_COMMAND="ssh -o ProxyCommand='connect-proxy ${_cc_connect_flag} ${_cc_host}:${_cc_port} %h %p'"
     elif nc -h 2>&1 | grep -q -- '-X'; then
         # macOS nc / openbsd-netcat — 部分代理有兼容问题
-        export GIT_SSH_COMMAND="ssh -o ProxyCommand='nc -X connect -x ${_cc_host}:${_cc_port} %h %p'"
+        export GIT_SSH_COMMAND="ssh -o ProxyCommand='nc -X ${_cc_nc_flag} -x ${_cc_host}:${_cc_port} %h %p'"
     else
         echo "[WARN] 未找到 SSH 代理工具（需要 connect / ncat / connect-proxy）"
     fi
 
-    unset _cc_tmp _cc_port _cc_host
+    unset _cc_tmp _cc_port _cc_host _cc_default _cc_connect_flag _cc_ncat_type _cc_nc_flag
     echo "[OK] Proxy set to $PROXY"
     ;;
 esac

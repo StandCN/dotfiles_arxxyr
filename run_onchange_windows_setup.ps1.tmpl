@@ -1,0 +1,201 @@
+{{- if eq .chezmoi.os "windows" -}}
+$scriptDir = Join-Path $env:USERPROFILE '.custom_scripts'
+
+$currentPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+
+if ($currentPath -notlike "*$scriptDir*") {
+    $newPath = "$currentPath;$scriptDir"
+    [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
+    Write-Host "[OK] Added $scriptDir to user PATH"
+} else {
+    Write-Host "[SKIP] $scriptDir already in PATH"
+}
+
+try {
+    $policy = Get-ExecutionPolicy -Scope CurrentUser
+    if ($policy -eq 'Restricted') {
+        Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force
+        Write-Host "[OK] Set ExecutionPolicy to RemoteSigned"
+    }
+} catch {
+    Write-Host "[SKIP] ExecutionPolicy check skipped (not critical)"
+}
+
+$profilePath = $PROFILE.CurrentUserAllHosts
+if (!(Test-Path $profilePath)) {
+    New-Item -Path $profilePath -ItemType File -Force | Out-Null
+}
+
+$aliasBlock = @'
+
+# === chezmoi custom scripts aliases ===
+Set-Alias cc-update "$env:USERPROFILE\.custom_scripts\cc-update.ps1"
+Set-Alias cc-claude "$env:USERPROFILE\.custom_scripts\cc-claude.ps1"
+# === end chezmoi aliases ===
+'@
+
+$profileContent = Get-Content $profilePath -Raw -ErrorAction SilentlyContinue
+if ($profileContent -notlike '*chezmoi custom scripts*') {
+    Add-Content -Path $profilePath -Value $aliasBlock
+    Write-Host "[OK] Added aliases to $profilePath"
+} else {
+    Write-Host "[SKIP] Aliases already exist"
+}
+
+# 本机代理（xray mixed 入站），winget/rust/uv/codex/claude 安装段共用；
+# Windows 代理在本机，127.0.0.1 直用
+# 全程走代理：尊重外部已注入的 $env:HTTPS_PROXY，否则回落本机 xray 入站；
+# 下游 winget --proxy / curl.exe --proxy / npm 均用此 $proxy
+$proxy = if ($env:HTTPS_PROXY) { $env:HTTPS_PROXY } else { 'http://{{ .proxy.host }}:{{ .proxy.port }}' }
+
+# ==================== winget：代理初始化 + 基础包 ====================
+# ProxyCommandLineOptions 是管理员设置，首次启用需 UAC 提权确认；
+# 未启用时 winget install 带 --proxy 会直接报错，故先查状态再决定
+$wingetProxyEnabled = $false
+try {
+    $adminSettings = (winget settings export 2>$null | ConvertFrom-Json).adminSettings
+    $wingetProxyEnabled = ($adminSettings.ProxyCommandLineOptions -eq $true)
+} catch {}
+if ($wingetProxyEnabled) {
+    Write-Host "[SKIP] winget ProxyCommandLineOptions already enabled"
+} else {
+    Write-Host "[ADMIN] 启用 winget 代理选项（弹出 UAC，请确认）..."
+    try {
+        Start-Process -Verb RunAs -Wait -FilePath 'winget' -ArgumentList 'settings','--enable','ProxyCommandLineOptions'
+        $adminSettings = (winget settings export 2>$null | ConvertFrom-Json).adminSettings
+        $wingetProxyEnabled = ($adminSettings.ProxyCommandLineOptions -eq $true)
+    } catch {}
+    if ($wingetProxyEnabled) {
+        Write-Host "[OK] winget ProxyCommandLineOptions enabled"
+    } else {
+        Write-Host "[WARN] winget 代理选项未启用（UAC 被取消？），后续安装退回直连"
+    }
+}
+
+# 基础包（Windows 不装 nvim 与 fzf/rg/eza/zoxide/yazi 等 CLI 族，终端活在 WSL 干）。
+# Cmd 探测优先于 winget list：官网 msi 手装的 Node 无 winget 源映射，只查 list 会叠装
+$WINGET_PKGS = @(
+    @{ Id = 'Git.Git';                   Cmd = 'git'  },
+    @{ Id = 'OpenJS.NodeJS.LTS';         Cmd = 'node' },
+    @{ Id = 'Microsoft.PowerShell';      Cmd = 'pwsh' },
+    @{ Id = 'Microsoft.WindowsTerminal'; Cmd = 'wt'   },
+    @{ Id = 'Microsoft.PowerToys';       Cmd = $null  }
+)
+foreach ($pkg in $WINGET_PKGS) {
+    if ($pkg.Cmd -and (Get-Command $pkg.Cmd -ErrorAction SilentlyContinue)) {
+        Write-Host "[SKIP] $($pkg.Id) already installed"
+        continue
+    }
+    if (winget list --exact --id $pkg.Id 2>$null | Select-String -SimpleMatch -Quiet $pkg.Id) {
+        Write-Host "[SKIP] $($pkg.Id) already installed"
+        continue
+    }
+    Write-Host "[INSTALL] $($pkg.Id) <- winget..."
+    $wingetArgs = @('install', '--exact', '--id', $pkg.Id, '--source', 'winget', '--silent',
+                    '--accept-package-agreements', '--accept-source-agreements')
+    if ($wingetProxyEnabled) {
+        winget @wingetArgs --proxy $proxy
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "[WARN] $($pkg.Id) 代理安装失败，退回直连重试..."
+            winget @wingetArgs
+        }
+    } else {
+        winget @wingetArgs
+    }
+    if ($LASTEXITCODE -ne 0) { Write-Host "[FAIL] $($pkg.Id) 安装失败" }
+}
+
+# Rust 工具链（官方 rustup-init，nightly）
+if (Get-Command rustup -ErrorAction SilentlyContinue) {
+    $toolchains = rustup toolchain list 2>$null
+    if ($toolchains -match '^nightly') {
+        Write-Host "[SKIP] rust nightly already installed"
+    } else {
+        Write-Host "[INSTALL] rust nightly toolchain..."
+        $env:HTTPS_PROXY = $proxy; $env:HTTP_PROXY = $proxy
+        rustup toolchain install nightly
+        Remove-Item Env:\HTTPS_PROXY, Env:\HTTP_PROXY -ErrorAction SilentlyContinue
+    }
+} else {
+    Write-Host "[INSTALL] rustup <- 官方 rustup-init.exe（default=nightly）..."
+    $rustupInit = Join-Path $env:TEMP 'rustup-init.exe'
+    # 官方下载地址；先走代理、失败退回直连
+    curl.exe -fsSL --proxy $proxy --max-time 60 https://win.rustup.rs/x86_64 -o $rustupInit 2>$null
+    if (-not (Test-Path $rustupInit) -or (Get-Item $rustupInit).Length -eq 0) {
+        curl.exe -fsSL --max-time 60 https://win.rustup.rs/x86_64 -o $rustupInit 2>$null
+    }
+    if ((Test-Path $rustupInit) -and (Get-Item $rustupInit).Length -gt 0) {
+        $env:HTTPS_PROXY = $proxy; $env:HTTP_PROXY = $proxy
+        & $rustupInit -y --default-toolchain nightly
+        Remove-Item Env:\HTTPS_PROXY, Env:\HTTP_PROXY -ErrorAction SilentlyContinue
+        Remove-Item $rustupInit -ErrorAction SilentlyContinue
+        Write-Host "[OK] rustup installed (default=nightly)"
+    } else {
+        Write-Host "[FAIL] rustup-init.exe 下载失败（检查代理后重跑 chezmoi apply）"
+    }
+}
+
+# uv（官方安装脚本 astral.sh）；PATH 由安装器写入用户注册表，Windows 无纳管 rc 漂移问题
+if (Get-Command uv -ErrorAction SilentlyContinue) {
+    Write-Host "[SKIP] uv already installed"
+} else {
+    Write-Host "[INSTALL] uv <- 官方脚本 astral.sh/uv/install.ps1..."
+    $uvInstaller = Join-Path $env:TEMP 'uv-install.ps1'
+    # 脚本先走代理下载、失败退回直连；安装器内部下载 release 产物靠代理环境变量
+    curl.exe -fsSL --proxy $proxy --max-time 60 https://astral.sh/uv/install.ps1 -o $uvInstaller 2>$null
+    if (-not (Test-Path $uvInstaller) -or (Get-Item $uvInstaller).Length -eq 0) {
+        curl.exe -fsSL --max-time 60 https://astral.sh/uv/install.ps1 -o $uvInstaller 2>$null
+    }
+    if ((Test-Path $uvInstaller) -and (Get-Item $uvInstaller).Length -gt 0) {
+        $env:HTTPS_PROXY = $proxy; $env:HTTP_PROXY = $proxy
+        & $uvInstaller
+        Remove-Item Env:\HTTPS_PROXY, Env:\HTTP_PROXY -ErrorAction SilentlyContinue
+        Remove-Item $uvInstaller -ErrorAction SilentlyContinue
+        Write-Host "[OK] uv installed"
+    } else {
+        Write-Host "[FAIL] uv install.ps1 下载失败（检查代理后重跑 chezmoi apply）"
+    }
+}
+
+# Codex CLI（npm 全局；node 由上方 winget 基础包段提供）；刚装完 node 时当前会话 PATH 未刷新，兜底用安装目录全路径
+if (Get-Command codex -ErrorAction SilentlyContinue) {
+    Write-Host "[SKIP] codex already installed"
+} else {
+    $npmCmd = (Get-Command npm -ErrorAction SilentlyContinue).Source
+    if (-not $npmCmd -and (Test-Path "$env:ProgramFiles\nodejs\npm.cmd")) {
+        $npmCmd = "$env:ProgramFiles\nodejs\npm.cmd"
+    }
+    if ($npmCmd) {
+        Write-Host "[INSTALL] codex <- npm install -g @openai/codex..."
+        $env:HTTPS_PROXY = $proxy; $env:HTTP_PROXY = $proxy
+        & $npmCmd install -g @openai/codex
+        Remove-Item Env:\HTTPS_PROXY, Env:\HTTP_PROXY -ErrorAction SilentlyContinue
+    } else {
+        Write-Host "[FAIL] codex: npm 不可用（node 未装成功）"
+    }
+}
+
+# Claude Code（官方 install.ps1）；引导脚本先代理后直连下载，安装器下载二进制吃 env 代理
+if (Get-Command claude -ErrorAction SilentlyContinue) {
+    Write-Host "[SKIP] claude code already installed"
+} else {
+    Write-Host "[INSTALL] claude code <- 官方脚本 claude.ai/install.ps1..."
+    $ccInstaller = Join-Path $env:TEMP 'claude-install.ps1'
+    curl.exe -fsSL --proxy $proxy --max-time 60 https://claude.ai/install.ps1 -o $ccInstaller 2>$null
+    if (-not (Test-Path $ccInstaller) -or (Get-Item $ccInstaller).Length -eq 0) {
+        curl.exe -fsSL --max-time 60 https://claude.ai/install.ps1 -o $ccInstaller 2>$null
+    }
+    if ((Test-Path $ccInstaller) -and (Get-Item $ccInstaller).Length -gt 0) {
+        $env:HTTPS_PROXY = $proxy; $env:HTTP_PROXY = $proxy
+        & $ccInstaller
+        Remove-Item Env:\HTTPS_PROXY, Env:\HTTP_PROXY -ErrorAction SilentlyContinue
+        Remove-Item $ccInstaller -ErrorAction SilentlyContinue
+    } else {
+        Write-Host "[FAIL] claude install.ps1 下载失败（检查代理后重跑 chezmoi apply）"
+    }
+}
+{{- else -}}
+#!/bin/sh
+echo "[SKIP] Not Windows"
+{{- end -}}
+

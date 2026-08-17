@@ -119,16 +119,30 @@ cargo fmt --all && cargo clippy --all --all-targets -- -D warnings
 > **强制规则**：每次 `git commit` 前必须先跑 `fmt` + `clippy`，确保零警告后再提交。
 
 ### CI 构建优化
-```bash
-# 1. 增量编译（减少 40%）
-export CARGO_INCREMENTAL=1
 
-# 2. sccache（20 分钟 → 4-6 分钟）
+> **sccache 与增量编译互斥**（sccache 不缓存增量编译单元），按场景分工，不要同时开启：
+
+| 场景 | 策略 |
+|------|------|
+| 本地 dev | 增量编译（Cargo 默认开启），不配 sccache |
+| CI | `CARGO_INCREMENTAL=0` + sccache（20 分钟 → 4-6 分钟） |
+
+```bash
+# 仅 CI 环境
+export CARGO_INCREMENTAL=0
 cargo install sccache
 # .cargo/config.toml: rustc-wrapper = "sccache"
+```
 
-# 3. 定期清理
-rm -rf ~/.cargo/registry ~/.cargo/git
+### 磁盘缓存治理
+
+- **`~/.cargo` 全局缓存**：Cargo 1.88+ 内置自动 GC 且默认开启（长期未用的 registry/git 缓存自动清理），**不要再手动 `rm -rf ~/.cargo/registry`**——只会害下次全量重新下载
+- **各项目 `target/`**：用 cargo-sweep 按策略回收，不要一刀切 `cargo clean`（活跃项目会被打回冷构建）
+
+```bash
+cargo install cargo-sweep
+cargo sweep -r --installed ~/repo/rust   # rustup update 后跑：清掉旧工具链的产物（nightly 用户的主要膨胀源）
+cargo sweep -r --time 30 ~/repo/rust     # 定期跑：清 30 天未更新的产物
 ```
 
 ### 警告拦截（build.warnings，Rust 1.97+）
@@ -264,6 +278,21 @@ if error { bincode::serialize(&payload); }
 struct Payload<'a> { name: &'a str }
 ```
 
+### 热点路径四招（先 profile 再动手）
+
+按普适度排序；前两招零风险，审查时顺手查，后两招先确认边界：
+
+| 招式 | 做法 | 边界 |
+|------|------|------|
+| 删中间集合 | `.collect::<Vec<_>>().iter().sum()` → 直接 `.sum()` | 迭代器惰性，`collect` 才物化分配 |
+| 借用代替分配 | 计数 `HashMap<String,_>` → `HashMap<&str,_>`，仅输出时 `to_string()` | 键借用原始缓冲 → 要求整个输入驻留内存；流式逐行读不能照搬 |
+| entry 合并查找 | `contains_key`+`insert`/`get_mut`（2-3 次哈希）→ `*m.entry(k).or_insert(0) += 1` | 无；clippy `map_entry` 可自动抓 |
+| Rayon map-reduce | `par_lines().fold(HashMap::new, …).reduce(…)`：线程私有 map，最后合并 | 仅大数据量 + 任务独立 + CPU 密集；小任务被调度/合并成本反噬。`par_lines` 与 `&str` 键共享同一前提——整段输入在内存 |
+
+**无序删除**：`Vec::remove(i)` O(n) 整体前移；业务不依赖顺序时用 `swap_remove(i)` O(1) 末尾补位。循环删除时换进来的元素要原地重查（索引不前进）；批量条件删除直接 `retain`/`extract_if`（1.87+），更不易错。
+
+> 所有倍数都出自特定 benchmark，不可外推。顺序：criterion/divan + `black_box` 定位热点 → 删分配、重复计算、多余约束（保序、拥有权）→ 最后才谈并行。
+
 ### 高级优化速查
 | 症状 | 方案 |
 |------|------|
@@ -367,7 +396,8 @@ package/
 - `VERSION` 文件内容与产物命名中的版本一致
 
 ### 二进制压缩
-- Linux / Windows：UPX `--best --lzma`（编译型语言适用）
+- Linux：UPX `--best --lzma`（编译型语言适用）
+- Windows：**跳过** —— UPX 加壳的无签名 exe 触发 Defender/SmartScreen 木马误报（`Wacatac`/`Wacapew!ml` 类启发式判定），体积换可用性不划算；根治需 Authenticode 签名证书
 - macOS：跳过（UPX 不支持）
 
 ### 预发布标记
@@ -396,6 +426,33 @@ package/
 ```
 
 - 默认样式：`rounded=1`、`spacing=15`、边路由 `orthogonal`
+
+---
+
+## 11. Dotfiles 管理（chezmoi）
+
+所有 dotfiles（**包括本文件**）由 chezmoi 管理，源仓库：`~/.local/share/chezmoi`。
+
+**链接拓扑**（权威源只有一份，其余为符号链接，改权威源即全端生效）：
+
+| 内容 | 权威源 | 符号链接 |
+|------|--------|----------|
+| Agent 指令 | `~/.claude/CLAUDE.md`（本文件） | `~/.codex/AGENTS.md` → 本文件 |
+| Agent skills | `~/.agents/skills/` | `~/.claude/skills/*`、`~/.codex/skills/*` |
+
+- **严禁直接修改目标文件**（如 `~/.claude/CLAUDE.md`、`~/.cargo/config.toml`）——下次 `chezmoi apply` 会被源文件覆盖
+- 正确流程：改源文件 → 预览 → 应用 → 提交
+
+```bash
+chezmoi source-path <目标文件>    # 定位源文件，直接编辑它
+chezmoi diff                      # 预览将要应用的变更
+chezmoi apply <目标文件>          # 只应用指定文件，避免顺带覆盖其他漂移
+cd "$(chezmoi source-path)" && git add <源文件> && git commit   # 提交源仓库
+```
+
+- 新文件纳管：`chezmoi add <目标文件>`
+- 机器差异用模板（`*.tmpl` + `.chezmoidata`）处理，不要 fork 多份配置
+- **密钥零明文**：含真实密钥/令牌的文件必须用 `encrypted_` 前缀（age/gpg 加密）或用模板从密码管理器读取；`private_` 只改本地权限（0600），推到**公开仓库仍是明文**，绝不能靠它护密钥
 
 ---
 

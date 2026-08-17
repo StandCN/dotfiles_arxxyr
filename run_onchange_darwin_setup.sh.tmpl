@@ -1,0 +1,148 @@
+{{- if eq .chezmoi.os "darwin" -}}
+#!/bin/bash
+set -e
+
+# 全程走代理：尊重外部已注入的代理（proxychains/手动 export 可覆盖），否则回落本机 xray 入站；
+# 所有联网命令（brew/curl/git/npm/rustup…）统一继承，无需逐条打补丁
+_default_proxy="http://{{ .proxy.host }}:{{ .proxy.port }}"
+export ALL_PROXY="${ALL_PROXY:-$_default_proxy}"
+export HTTPS_PROXY="${HTTPS_PROXY:-$ALL_PROXY}"
+export HTTP_PROXY="${HTTP_PROXY:-$ALL_PROXY}"
+export NO_PROXY="${NO_PROXY:-localhost,127.0.0.1,::1}"
+
+# 安装 Homebrew（如果未安装）
+if ! command -v brew &>/dev/null; then
+    echo "[INSTALL] Homebrew..."
+    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null)" || eval "$(/usr/local/bin/brew shellenv 2>/dev/null)"
+else
+    echo "[SKIP] Homebrew already installed"
+fi
+
+# 安装必要工具
+# connect：cc-proxy SSH 打洞首选工具，mac 专属保留（Linux 已裁掉，用 nc -X 兜底）；
+# node：mac 例外走 brew（Linux 走官方 nvm 脚本）
+PACKAGES=(
+    zoxide
+    bash-completion
+    xmake
+    connect
+    proxychains-ng
+    eza
+    fzf
+    yazi
+    ripgrep
+    btop
+    jq
+    wget
+    node
+)
+
+for pkg in "${PACKAGES[@]}"; do
+    if brew list "$pkg" &>/dev/null; then
+        echo "[SKIP] $pkg already installed"
+    else
+        echo "[INSTALL] $pkg..."
+        brew install "$pkg"
+    fi
+done
+
+# Rust 工具链（官方 rustup，nightly）；macOS 代理在本机，127.0.0.1 直用
+if ! command -v rustup &>/dev/null && [[ -f "$HOME/.cargo/env" ]]; then
+    source "$HOME/.cargo/env"
+fi
+if command -v rustup &>/dev/null; then
+    if rustup toolchain list 2>/dev/null | grep -q '^nightly'; then
+        echo "[SKIP] rust nightly already installed"
+    else
+        echo "[INSTALL] rust nightly toolchain..."
+        rustup toolchain install nightly || rustup toolchain install nightly
+    fi
+else
+    echo "[INSTALL] rustup <- 官方脚本 sh.rustup.rs（default=nightly）..."
+    # 代理由脚本开头全局 export 统一提供，失败重试一次
+    bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --default-toolchain nightly' \
+        || bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --default-toolchain nightly'
+    source "$HOME/.cargo/env"
+    echo "[OK] $(rustc --version)"
+fi
+
+# uv（官方安装脚本 astral.sh）；代理在本机，127.0.0.1 直用；
+# UV_NO_MODIFY_PATH=1 禁写纳管 rc（PATH 引导由 profile.sh source ~/.local/bin/env 承担）
+if command -v uv &>/dev/null || [[ -x "$HOME/.local/bin/uv" ]]; then
+    echo "[SKIP] uv already installed"
+else
+    echo "[INSTALL] uv <- 官方脚本 astral.sh/uv/install.sh..."
+    # 代理由脚本开头全局 export 统一提供；UV_NO_MODIFY_PATH 禁止安装器写 rc
+    UV_NO_MODIFY_PATH=1 bash -c 'set -o pipefail; curl -LsSf https://astral.sh/uv/install.sh | sh' \
+        || UV_NO_MODIFY_PATH=1 bash -c 'set -o pipefail; curl -LsSf https://astral.sh/uv/install.sh | sh'
+    echo "[OK] $("$HOME/.local/bin/uv" --version)"
+fi
+
+# Codex CLI（npm 全局；node 由上方 brew 提供）
+if command -v codex &>/dev/null; then
+    echo "[SKIP] codex already installed"
+else
+    echo "[INSTALL] codex <- npm install -g @openai/codex..."
+    npm install -g @openai/codex || npm install -g @openai/codex
+fi
+
+# Claude Code（官方原生安装器）；安装器是静态二进制，必须 env 代理
+if command -v claude &>/dev/null || [[ -x "$HOME/.local/bin/claude" ]]; then
+    echo "[SKIP] claude code already installed"
+else
+    echo "[INSTALL] claude code <- 官方脚本 claude.ai/install.sh..."
+    bash -c 'set -o pipefail; curl -fsSL https://claude.ai/install.sh | bash' \
+        || bash -c 'set -o pipefail; curl -fsSL https://claude.ai/install.sh | bash'
+    echo "[OK] claude -> $HOME/.local/bin/claude"
+fi
+
+# Neovim nightly（--HEAD 从 git 源码构建）
+if brew list --head neovim &>/dev/null 2>&1; then
+    echo "[SKIP] neovim (HEAD) already installed"
+else
+    echo "[INSTALL] neovim --HEAD..."
+    brew install --HEAD neovim
+fi
+
+# Oh My Zsh
+if [[ -d "$HOME/.oh-my-zsh" ]]; then
+    echo "[SKIP] Oh My Zsh already installed"
+else
+    echo "[INSTALL] Oh My Zsh..."
+    RUNZSH=no KEEP_ZSHRC=yes sh -c "$(curl -fsSL https://raw.github.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
+fi
+
+# Zsh 插件（oh-my-zsh custom plugins）
+ZSH_CUSTOM="${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}"
+ZSH_PLUGINS="
+zsh-syntax-highlighting https://github.com/zsh-users/zsh-syntax-highlighting
+zsh-autosuggestions https://github.com/zsh-users/zsh-autosuggestions
+zsh-completions https://github.com/zsh-users/zsh-completions
+"
+
+echo "$ZSH_PLUGINS" | while read -r plugin url; do
+    [[ -z "$plugin" ]] && continue
+    if [[ -d "$ZSH_CUSTOM/plugins/$plugin" ]]; then
+        echo "[SKIP] $plugin already installed"
+    else
+        echo "[INSTALL] $plugin..."
+        git clone "$url" "$ZSH_CUSTOM/plugins/$plugin"
+    fi
+done
+
+# chezmoi git 集成：默认关闭 autoCommit/autoPush，公开仓库改用手动规范提交
+mkdir -p ~/.config/chezmoi
+if ! grep -q "autoCommit" ~/.config/chezmoi/chezmoi.toml 2>/dev/null; then
+    cat >> ~/.config/chezmoi/chezmoi.toml << 'EOF'
+[git]
+    autoCommit = false
+    autoPush = false
+EOF
+    echo "[OK] chezmoi git 集成已配置（autoCommit/autoPush 关闭）"
+else
+    echo "[SKIP] chezmoi already configured"
+fi
+
+echo "[DONE] macOS setup complete"
+{{ end -}}
