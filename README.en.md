@@ -102,12 +102,14 @@ sudo apt install -y ack antlr3 asciidoc autoconf automake autopoint binutils bis
 
 | Config | Path | Description |
 |---|---|---|
+| chezmoi itself | `~/.config/chezmoi/chezmoi.toml` | Generated from `.chezmoi.toml.tmpl` at the source root (chezmoi refuses to manage its own config as a regular file); autoCommit/autoPush disabled, commits are manual |
 | zsh | `~/.zshrc`, `~/.p10k.zsh` | Zsh + Powerlevel10k (loads nvm) |
 | bash | `~/.bashrc` | Bash config (loads nvm + completion) |
-| shell | `~/.config/shell/profile.sh` | Shared PATH/env bootstrap (cargo, nvm, uv, custom scripts) |
+| shell | `~/.config/shell/profile.sh` | Shared PATH/env bootstrap (cargo, nvm, uv, custom scripts, kimi-code) |
 | claude | `~/.claude/` | Claude Code settings (templated: WSL render drops hardcoded proxy) |
-| codex | `~/.codex/AGENTS.md` | Codex instructions (symlink to Claude's CLAUDE.md) |
-| agents | `~/.agents/skills/` | Shared agent skills (claude / codex) |
+| codex | `~/.codex/AGENTS.md`, `~/.codex/config.toml`, `~/.codex/skills/` | Codex instructions (symlink to Claude's CLAUDE.md); config.toml uses a `modify_` script pinning only model/model_reasoning_effort/service_tier/project_doc_fallback_filenames/status_line, unions `[projects]`, passes nux counters through |
+| kimi | `~/.kimi-code/config.toml`, `~/.kimi-code/tui.toml` | Kimi Code CLI (config.toml uses a `modify_` script — pins only the enforced keys, passes the rest through to the CLI; tui.toml fully managed. Credentials not managed) |
+| agents | `~/.agents/skills/`, `~/.agents/AGENTS.md` | Shared agent skills (claude / codex); AGENTS.md symlinks to CLAUDE.md so kimi picks it up (its generic user-level location) |
 | cargo | `~/.cargo/config.toml` | Rust cargo config (templated: no proxy line on WSL) |
 | kitty | `~/.config/kitty/` | Kitty terminal |
 | alacritty | `~/.config/alacritty/` | Alacritty terminal |
@@ -139,6 +141,7 @@ automatically. `sudo` strips env vars; for root use `cc-install` / `cc-pc` (expl
 | `cc-proxy-host` | Print proxy host (WSL NAT → gateway, else 127.0.0.1) |
 | `cc-claude [kill]` | Launch Claude Code with proxy / kill all Claude processes |
 | `cc-codex [kill]` | Launch Codex CLI with proxy |
+| `cc-kimi [kill]` | Launch Kimi Code CLI (K3 + max thinking + auto permission, no proxy) |
 | `cc-codex-app` | macOS: set proxy env (launchctl) for Codex desktop app |
 | `source cc-proxy [off]` | Set/unset proxy env + git proxy for current shell |
 | `cc-pc <cmd>` | Run command through proxychains with dynamically generated conf |
@@ -148,6 +151,8 @@ automatically. `sudo` strips env vars; for root use `cc-install` / `cc-pc` (expl
 
 ```bash
 cc-claude                    # Start Claude with proxy (host auto-detected)
+cc-kimi                      # Start Kimi (K3 / max thinking / auto permission)
+cc-kimi -c                   # Args starting with - pass through: resume last session
 source cc-proxy              # Enable proxy env in current shell
 source cc-proxy off          # Disable proxy
 cc-pc git clone <url>        # One-off command through proxychains
