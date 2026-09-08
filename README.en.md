@@ -13,7 +13,7 @@ sh -c "$(curl -fsLS get.chezmoi.io/lb)"
 ### New Machine (One Command)
 
 ```bash
-chezmoi init --apply git@github.com:arxxyr/dotfiles.git
+chezmoi init --apply git@github.com:StandCN/dotfiles_arxxyr.git
 ```
 
 ### Daily Usage
