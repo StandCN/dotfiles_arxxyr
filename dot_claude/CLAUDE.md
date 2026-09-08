@@ -369,6 +369,22 @@ if (-not $PSVersionTable) { exit 1 }
 - 格式遵循 [SemVer](https://semver.org/)：`MAJOR.MINOR.PATCH`（如 `0.3.0`）
 - 多模块/多包项目统一版本，不允许子模块各自定义版本号
 
+### 版本升级用语（强制约定）
+
+- **用户指定目标版本时，目标版本优先**，例如“版本改为 0.8.1”就使用 `0.8.1`，不自行换成其他版本。
+- **“小版本”统一表示 PATCH 补丁版本**，适用于所有项目，包括 `0.x` 阶段；严禁将中文“小版本”机械理解为 SemVer 的 `MINOR`。
+
+| 用户表述 | 执行规则 | 示例 |
+|----------|----------|------|
+| “小版本” / “bump 小版本” / “bump patch” / “补丁号加一” | `PATCH + 1`，保持 `MAJOR.MINOR` | `0.8.0 → 0.8.1` |
+| “bump minor” / “次版本号加一” | `MINOR + 1`，`PATCH` 清零 | `0.8.1 → 0.9.0` |
+| “bump major” / “主版本号加一” | `MAJOR + 1`，`MINOR.PATCH` 清零 | `0.8.1 → 1.0.0` |
+
+- 用户要求升级但未指定级别，且改动仅是保持兼容的问题修复、解析兼容修复或 CI/构建修正时，默认递增 `PATCH`。
+  新增功能或破坏性变更需结合实际发布范围判断，不能仅凭“bump”一词自行升级 `MINOR` 或 `MAJOR`。
+- 执行前读取权威版本，并简短说明“当前版本 → 目标版本”；不要等提交或推送后才解释升级级别。
+- 同步更新锁文件中的应用版本及当前发布示例；不改第三方依赖版本、历史记录或固定测试样例中的版本。
+
 ### 版本格式
 | 场景 | 格式 | 示例 |
 |------|------|------|
@@ -469,6 +485,19 @@ cd "$(chezmoi source-path)" && git add <源文件> && git commit   # 提交源�
 - 新文件纳管：`chezmoi add <目标文件>`
 - 机器差异用模板（`*.tmpl` + `.chezmoidata`）处理，不要 fork 多份配置
 - **密钥零明文**：含真实密钥/令牌的文件必须用 `encrypted_` 前缀（age/gpg 加密）或用模板从密码管理器读取；`private_` 只改本地权限（0600），推到**公开仓库仍是明文**，绝不能靠它护密钥
+
+---
+
+## 12. Python 工具链（默认使用 uv）
+
+- **Python 默认使用 `uv`** 管理解释器、虚拟环境、依赖和命令运行。用户明确指定其他工具，或现有项目有必须遵守的工具链约束时按其要求执行，不擅自迁移已有项目。
+- 新 Python 项目以 `pyproject.toml` 声明依赖、`uv.lock` 锁定解析结果，两者一并提交，不手改锁文件。添加/移除依赖用 `uv add` / `uv remove`，开发依赖用 `uv add --dev`，同步项目环境用 `uv sync`；不要用临时安装代替依赖声明。
+- 项目内运行脚本、测试和开发工具用 `uv run`，例如 `uv run python scripts/check.py`、`uv run pytest`、`uv run ruff check .`。默认不直接调用裸 `python` / `pip` / `pytest`，也不要求手动激活虚拟环境。
+- CI 和按已提交版本复现环境时用 `uv sync --locked`、`uv run --locked ...`，锁文件与项目声明不一致应报错，不能在验证时静默更新锁文件。
+- 临时使用独立 CLI 工具用 `uvx <工具>`（即 `uv tool run <工具>`）；依赖当前项目环境的工具仍用 `uv run`。
+- 独立单文件脚本需要第三方依赖时，用 `uv add --script script.py <依赖>` 写入 PEP 723 内联元数据，再用 `uv run script.py` 执行。非 Python 项目中的临时检查可用 `uv run --no-project python ...`，不为一次运行创建项目配置。
+- 兼容已有 `requirements.txt` 项目时，复用项目的隔离环境，缺失时用 `uv venv` 创建，再用 `uv pip install -r requirements.txt` 安装；是否迁移到 `pyproject.toml` / `uv.lock` 由项目范围决定。
+- 复用项目约定的 Python 版本与隔离环境；依赖不装入系统 Python，不使用 `sudo pip` 或 `uv pip install --system`。`uv` 缺失时按项目约定处理安装，不默默切回全局 `pip`。
 
 ---
 
