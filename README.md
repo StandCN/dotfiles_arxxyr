@@ -13,7 +13,7 @@ sh -c "$(curl -fsLS get.chezmoi.io/lb)"
 ### 新机器（一条命令）
 
 ```bash
-chezmoi init --apply git@github.com:arxxyr/dotfiles.git
+chezmoi init --apply git@github.com:StandCN/dotfiles_arxxyr.git
 ```
 
 ### 日常使用
